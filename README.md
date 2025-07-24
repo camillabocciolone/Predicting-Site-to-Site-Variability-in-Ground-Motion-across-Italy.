@@ -42,7 +42,6 @@ This repository contains all code files developed in R for the project, divided 
 ## Credits
 
 - **Camilla Bocciolone**, Mattéo Bevilacqua, Martina Maria Calandro, Mattia De Bartolomeis, Pınar Nur Özkaplan  
-  *Group 11 - Applied Statistics, Politecnico di Milano*  
 - **Supervisor**: Prof. Alessandra Menafoglio  
 - **INGV Advisors**: Dr. Sara Sgobba, Dr. Giulio Brunelli, Dr. Giovanni Lanzano
 
