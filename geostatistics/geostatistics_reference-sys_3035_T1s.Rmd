@@ -1,0 +1,1823 @@
+---
+title: "R Notebook"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+  html_notebook: default
+---
+
+geostatical analysis on T=1s
+
+ordinary kriging vs universal 
+
+different combinations of covariates
+
+```{r}
+rm(list=ls())
+graphics.off()
+library(sp)           ## Data management
+library(lattice)      ## Data management
+library(geoR)         ## Geostatistics
+library(gstat)        ## Geostatistics
+library(sf)
+library(raster)
+
+## Functions for graphics 
+v.f <- function(x, ...){100-cov.spatial(x, ...)}
+v.f.est<-function(x,C0, ...){C0-cov.spatial(x, ...)}
+#itac = read.csv("FINAL_DATASET.csv") 
+itac = read.csv("ITACA_V3_maps_and_PCA.csv", sep=";")
+coordinates = na.omit(itac[,6:7]) #Taking only lat and long
+psf = st_as_sf(coordinates, coords = c("st_longitude", "st_latitude"), crs = 4326)
+
+# Transform in ETRS89 / LAEA Europe (EPSG:3035)
+new_coordinates = st_transform(psf, 3035)
+
+# Estrai le coordinate trasformate
+set.seed(42)  # per riproducibilità
+newcoords = as.data.frame(st_coordinates(new_coordinates))
+colnames(newcoords) = c('x', 'y')
+
+# Aggiungi jitter per evitare problemi numerici nel kriging universale
+newcoords$x = newcoords$x + rnorm(nrow(newcoords), mean = 0, sd = 1)
+newcoords$y = newcoords$y + rnorm(nrow(newcoords), mean = 0, sd = 1)
+
+
+itaca = itac[,-c(6,7)]
+itaca = cbind (newcoords, itaca) #New dataset with coordinates
+ita = itaca
+
+
+#LES
+coordinates(ita) = c('x', 'y')
+bubble(ita, 'dS2S_SA_T0_100', do.log = TRUE, key.space = 'bottom') #negative value of ds2s means deamplification
+bubble(ita, 'dS2S_SA_T0_010', do.log = TRUE, key.space = 'bottom') #Can make an animation
+bubble(ita, 'dS2S_SA_T1_000', do.log = TRUE, key.space = 'bottom')
+bubble(ita, 'dS2S_SA_T2_000', do.log = TRUE, key.space = 'bottom')
+bubble(ita, 'dS2S_SA_T3_000', do.log = TRUE, key.space = 'bottom')
+bubble(ita, 'dS2S_SA_T4_000', do.log = TRUE, key.space = 'bottom')
+dev.off()
+
+hist(itaca$dS2S_SA_T0_100, breaks=16, col="grey", main='Histogram of dS2S T=0s', prob = TRUE, xlab = 'Zn')
+hist(itaca$dS2S_SA_T0_010, breaks=16, col="grey", main='Histogram of dS2S T=0,01s', prob = TRUE, xlab = 'Zn') #Quite symmetric but not ~N
+hist(itaca$dS2S_SA_T1_000, breaks=16, col="grey", main='Histogram of dS2S T=1s', prob = TRUE, xlab = 'Zn')
+hist(itaca$dS2S_SA_T5_000, breaks=16, col="grey", main='Histogram of dS2S T=5s', prob = TRUE, xlab = 'Zn')
+dev.off()
+
+# add distance in the dataset to see id itaca$ds2s changes with distance
+par(mfrow=c(2,3))
+layout(matrix(1:6, nrow=2, ncol=3)) #Put a ggpairs maybe
+xyplot(itaca$dS2S_SA_T0_100 ~ itaca$vs30_from_profile, ylab = 'dS2S T=0s', xlab = 'Vs30 from profile') #Many NA not plotted
+xyplot(itaca$dS2S_SA_T0_100 ~ itaca$Vs30_Brunelli_simple, ylab = 'dS2S T=0s', xlab = 'Vs30 Brunelli')
+xyplot(itaca$dS2S_SA_T0_100 ~ itaca$Vs30_MORI_simple, ylab = 'dS2S T=0s', xlab = 'Vs30 MORI')
+xyplot(itaca$dS2S_SA_T0_100 ~ itaca$vseq_bedrock, ylab = 'dS2S T=0s', xlab = 'Vs30 equivalent')
+xyplot(itaca$dS2S_SA_T0_100 ~ itaca$Vs30_Brunelli_bilinear, ylab = 'dS2S T=0s', xlab = 'Vs30 Brunelli')
+xyplot(itaca$dS2S_SA_T0_100 ~ itaca$vs30_m_s_from_topography, ylab = 'dS2S T=0s', xlab = 'Vs30 from topography')
+
+attach(itaca)
+
+
+
+
+```
+
+```{r}
+#itaca[,1:2] = itaca[,1:2]/1000 # m-->km
+#VARIOGRAM ANALYSIS
+#STATIONARY model
+svgm <- variogram(dS2S_SA_T0_100 ~ 1, ita) #1 const predictor i.e. spatially const mean
+plot(svgm, main = 'Sample Variogram',pch=19) #Can see asymptote (var of process), range is finite, nugget around 0,2 (? how to find the nugget) 
+plot(variogram(dS2S_SA_T0_100 ~ 1, ita, alpha = c(0, 45, 90, 135)),pch=19) #They look similar, i.e. have isotropy (and most likely also stationarity)
+#plot(variogram(dS2S_SA_T0_100~ 1, ita, cutoff = 1100, width = 1100/15),pch=19) #bdry found wiht min/mac(x,y)
+#plot(variogram(dS2S_SA_T0_100~ 1, ita, cutoff = 1100, width = 1100/5),pch=19) #Meaning of cutoff distance and lag width
+dev.off()
+
+#VARIOGRAM model: reasonable to use spherical, beacuse have a ln increase in variogr. near 0 (with or without nugget)
+v = variogram(dS2S_SA_T0_100 ~ 1, ita)
+v1 = vgm(0.3, "Sph", 250000, 0.2) #How to initialize partial sill, range and nugget 
+v.fit <- fit.variogram(v, v1, fit.ranges = TRUE)
+plot(v, v.fit, pch = 19) #Very good at the beginning
+v.fit
+
+#prediction 
+s0.new = data.frame(x=4200129, y=2160892)
+coordinates(s0.new)=c('x','y')
+g.tr <- gstat(formula = dS2S_SA_T0_100 ~ 1, data = ita, model = v.fit, nmax = 20, set = list(gls=1))
+predict(g.tr, s0.new) #/!\ warning: covariance matrix det = 0 at this location, solved by putting nmax = 20 
+predict(g.tr, s0.new, BLUE = TRUE)
+
+#s0 = s1 known 
+g.tr <- gstat(formula = dS2S_SA_T0_100 ~ 1, data = ita, model = v.fit, nmax = 20, set = list(gls=1))
+predict(g.tr, ita[1,]) #It corresponds
+
+#pred over the grid --------------------------------------------------------------
+#construct the grid (JUST OVER ITALY)
+xi = seq(min(x), max(x), by = 10000) #1km accuracy
+yi = seq(min(y), max(y), by = 10000)
+ita.grid = expand.grid(x = xi, y = yi)
+coordinates(ita.grid) = ~x+y
+#proj4string(ita.grid) <- proj4string(itaca)
+g.tr = gstat(formula = dS2S_SA_T0_100 ~ 1, data = ita, model = v.fit, nmax = 20, set = list(gls=1)) # non va
+lz.ok = predict(g.tr, ita.grid, BLUE = FALSE)
+spplot(lz.ok) 
+
+# install.packages("rnaturalearth")
+# install.packages("rnaturalearthdata")
+# 
+# library(rnaturalearth)
+# library(rnaturalearthdata)
+# library(sf)
+# 
+# # Scarica mappa mondiale e filtra l’Italia
+# italy <- ne_countries(country = "Italy", scale = "medium", returnclass = "sf")
+# 
+# # Proietta in EPSG:3035
+# italy_3035 <- st_transform(italy, 3035)
+# 
+# # Converto a sf per mascherare
+# xi = seq(min(ita@coords[,1]), max(ita@coords[,1]), by = 1500)
+# yi = seq(min(ita@coords[,2]), max(ita@coords[,2]), by = 1500)
+# ita.grid = expand.grid(x = xi, y = yi)
+# coordinates(ita.grid) = ~x + y
+# proj4string(ita.grid) = CRS("+init=EPSG:3035")
+# 
+# # Torna a Spatial per kriging
+# ita.grid <- as(ita.grid, "Spatial")
+# g.tr <- gstat(formula = dS2S_SA_T0_100 ~ 1, data = ita, model = v.fit, nmax = 30)
+# lz.ok <- predict(g.tr, ita.grid, BLUE = FALSE)
+# spplot(lz.ok["var1.pred"], main = "Kriging over Italy")
+```
+
+# universal kringing Brunelli
+
+```{r}
+#universal kringing ---------------------------------------------------------
+ita_clean <- ita[!is.na(Vs30_Brunelli_simple), ]
+#swap stupido dei bicchieri perchè non volevo cambiare il codice
+i=ita_clean
+ita_clean=ita
+ita=i
+
+FORMULA = formula(dS2S_SA_T0_100 ~ Vs30_Brunelli_simple) # a single constant predictor
+v= variogram(FORMULA, data=ita)
+# v0= variogram(FORMULA, data=df0)
+plot(v, main = 'Variogram', pch=19)
+plot(variogram(FORMULA, ita, alpha = c(0, 45, 90, 135)),pch=19) #They look similar, i.e. have isotropy (and most likely also stationarity)
+dev.off()
+
+#VARIOGRAM model: Sferico con nugget è coerente con i dati; Range iniziale ≈ 250 000 m; sill parziale ≈ 0.30; nugget ≈ 0.10;
+
+v1 = vgm(0.3, "Sph", 250000, 0.2) #How to initialize partial sill, range and nugget 
+v.fit <- fit.variogram(v, v1, fit.ranges = TRUE)
+plot(v, v.fit, pch = 19) #Very good at the beginning
+v.fit
+```
+
+```{r}
+#prediction  
+
+# 1. Punto di predizione (EPSG:3035)
+s0 = data.frame(x = 4589868, y = 2179785, Vs30_Brunelli_simple = 497.3310)  # inserisci il valore corretto!
+coordinates(s0) <- c("x", "y")
+proj4string(s0) <- proj4string(ita)
+
+# 2. gstat object con formula UNIVERSAL
+g.tr <- gstat(formula = dS2S_SA_T0_100 ~ Vs30_Brunelli_simple, data = ita, model = v.fit, nmax = 30, set = list(gls=1))
+
+# 3. Predizione
+predict(g.tr, s0)
+
+```
+
+```{r}
+# Punto in long/lat
+vs30_r <- raster("INGV_data/Vs30_Brunelli_new/vs30ms")
+
+s0_ll <- data.frame(x = 13.270813, y = 42.67157)
+coordinates(s0_ll) <- c("x", "y")
+
+proj4string(s0_ll) <- CRS("+proj=longlat +datum=WGS84")
+
+# Trasforma nel CRS del raster (UTM33)
+s0_utm <- spTransform(s0_ll, crs(vs30_r))
+
+# Estrai Vs30
+vs30_val <- extract(vs30_r, s0_utm)
+
+# Trasforma in EPSG:3035
+s0_proj <- spTransform(s0_ll, CRS(SRS_string = "EPSG:3035"))
+
+# Converti in data.frame e RINOMINA LE COLONNE
+s0_df <- as.data.frame(coordinates(s0_proj))
+colnames(s0_df) <- c("x", "y")
+s0_df$Vs30_Brunelli_simple <- vs30_val
+
+# Crea SpatialPointsDataFrame
+coordinates(s0_df) <- c("x", "y")
+proj4string(s0_df) <- proj4string(ita) 
+
+predict(g.tr, s0_df)
+
+```
+
+dovrebbe venire 0.3974495924
+
+```{r}
+
+
+# --- 1. COSTRUISCI LA GRIGLIA CON CRS CORRETTO ---
+coords <- expand.grid(
+  x = seq(min(ita@coords[, 1]), max(ita@coords[, 1]), by = 10000),
+  y = seq(min(ita@coords[, 2]), max(ita@coords[, 2]), by = 10000)
+)
+
+# Crea SpatialPoints con CRS EPSG:3035 (cioè ETRS89 / LAEA Europe)
+sp_points <- sp::SpatialPoints(coords, proj4string = sp::CRS("+init=epsg:3035"))
+
+# --- 2. CARICA E SISTEMA IL RASTER ---
+vs30_r <- raster("INGV_data/Vs30_Brunelli_new/vs30ms")
+crs(vs30_r) <- sp::CRS("+proj=utm +zone=32 +datum=WGS84 +units=m +no_defs")  # imposta a mano se mancante
+
+# --- 3. RIPROIEZIONE GRIGLIA NEL CRS DEL RASTER ---
+sp_points_utm <- sp::spTransform(sp_points, sp::CRS("+proj=utm +zone=32 +datum=WGS84 +units=m +no_defs"))
+
+# --- 4. ESTRAZIONE VS30 ---
+vs30_vals <- raster::extract(vs30_r, sp_points_utm)
+
+# --- 5. COSTRUISCI GRIGLIA CON COVARIATA ---
+grid_spdf <- sp::SpatialPointsDataFrame(
+  coords = coords,
+  data   = data.frame(Vs30_Brunelli_simple = vs30_vals),
+  proj4string = sp::CRS("+init=epsg:3035")
+)
+
+grid_spdf_clean <- grid_spdf[!is.na(grid_spdf$Vs30_Brunelli_simple), ]
+proj4string(grid_spdf_clean) <- proj4string(ita)
+
+# --- 6. PREDIZIONE ---
+g.tr <- gstat::gstat(formula = dS2S_SA_T0_100 ~ Vs30_Brunelli_simple,
+                     data = ita, model = v.fit, nmax = 30,set = list(gls=1))
+
+lz.uk <- predict(g.tr, grid_spdf_clean)
+
+# --- 7. VISUALIZZA ---
+sp::spplot(lz.uk["var1.pred"], main = "Universal Kriging with Vs30 Brunelli")
+
+```
+
+```{r}
+
+# Calcola la cross-validation
+cv <- krige.cv(
+  formula   = dS2S_SA_T0_100 ~ Vs30_Brunelli_simple,
+  locations = ita,
+  model     = v.fit
+)
+
+sum(is.na(cv@data[["var1.pred"]]))
+
+# Elimina righe con NA in var1.pred (cioè dove la predizione non è riuscita)
+cv_data <- cv@data[!is.na(cv@data[["var1.pred"]]), ]
+
+# Calcola gli errori
+cv_data$residual <- cv_data$observed - cv_data$var1.pred
+rmse     <- sqrt(mean(cv_data$residual^2))
+mae      <- mean(abs(cv_data$residual))
+me       <- mean(cv_data$residual)
+loo_mse  <- mean(cv_data$residual^2)
+loo_sd   <- sd(cv_data$residual)  # Deviazione standard degli errori LOO
+
+# Mostra i risultati
+cat("✅ LOOCV results (solo punti validi):\n",
+    "RMSE     =", round(rmse, 4), "\n",
+    "MAE      =", round(mae, 4), "\n",
+    "ME       =", round(me, 4), "\n",
+    "loo_mse  =", round(loo_mse, 4), "\n",
+    "loo_sd   =", round(loo_sd, 4), "\n")
+
+
+```
+
+```{r}
+ita=ita_clean
+```
+
+# universal kringing slope
+
+```{r}
+#universal kringing ---------------------------------------------------------
+ita_clean <- ita[!is.na(ita$slope50_simple), ]
+#swap stupido dei bicchieri perchè non volevo cambiare il codice
+i=ita_clean
+ita_clean=ita
+ita=i
+FORMULA = formula(dS2S_SA_T0_100 ~ slope50_simple) # a single constant predictor
+v= variogram(FORMULA, data=ita)
+# v0= variogram(FORMULA, data=df0)
+plot(v, main = 'Variogram', pch=19)
+plot(variogram(FORMULA, ita, alpha = c(0, 45, 90, 135)),pch=19) #They look similar, i.e. have isotropy (and most likely also stationarity)
+dev.off()
+
+#VARIOGRAM model: Sferico con nugget è coerente con i dati; Range iniziale ≈ 250 000 m; sill parziale ≈ 0.30; nugget ≈ 0.10;
+
+v1 = vgm(0.3, "Sph", 250000, 0.2) #How to initialize partial sill, range and nugget 
+v.fit <- fit.variogram(v, v1, fit.ranges = TRUE)
+plot(v, v.fit, pch = 19) #Very good at the beginning
+v.fit
+```
+
+```{r}
+# --- UNIVERSAL KRIGING: PREDIZIONE IN UN PUNTO ---
+
+# 1. Crea data frame con coordinate del punto e valore della covariata
+s0_df <- data.frame(x = 4200129, y = 2160892, slope50_simple = 5.503583 )
+
+# 2. Crea SpatialPointsDataFrame con proiezione coerente con 'ita'
+s0 <- SpatialPointsDataFrame(
+  coords = s0_df[, c("x", "y")],
+  data   = data.frame(slope50_simple = s0_df$slope50_simple),
+  proj4string = CRS(SRS_string = "EPSG:3035")  # provvisorio
+)
+
+# 3. Allinea CRS al dataset di training (se diverso)
+proj4string(s0) <- proj4string(ita)  # imposta direttamente lo stesso CRS di 'ita'
+
+# 4. Crea oggetto gstat con formula universale (UK)
+g.tr <- gstat(formula = dS2S_SA_T0_100 ~ slope50_simple, data = ita, model = v.fit, nmax = 30, set = list(gls=1))
+
+# 5. Predizione
+predict(g.tr, s0)
+
+```
+
+```{r}
+# --- Predizione in un punto usando slope50_simple ---
+
+# 1. Carica il raster della slope
+slope_r <- raster("INGV_data/Slope_50")
+
+# 2. Definisci il punto di predizione in long/lat
+s0_ll <- data.frame(x = 13.270813, y = 42.67157)
+coordinates(s0_ll) <- c("x", "y")
+proj4string(s0_ll) <- CRS("+proj=longlat +datum=WGS84")
+
+# 3. Trasforma il punto nel CRS del raster (UTM33)
+s0_utm <- spTransform(s0_ll, crs(slope_r))
+
+# 4. Estrai il valore della slope dal raster
+slope_val <- extract(slope_r, s0_utm)
+
+# 5. Trasforma il punto in EPSG:3035 per la predizione
+s0_proj <- spTransform(s0_ll, CRS(SRS_string = "EPSG:3035"))
+
+# 6. Crea un data frame con coordinate e valore della slope
+s0_df <- as.data.frame(coordinates(s0_proj))
+colnames(s0_df) <- c("x", "y")
+s0_df$slope50_simple <- slope_val
+
+# 7. Crea SpatialPointsDataFrame con il CRS coerente con 'ita'
+s0 <- SpatialPointsDataFrame(
+  coords = s0_df[, c("x", "y")],
+  data   = data.frame(slope50_simple = s0_df$slope50_simple),
+  proj4string = CRS(proj4string(ita))
+  # usa il CRS del training set
+)
+
+# 8. Predizione usando il modello UK (slope)
+predict(g.tr, s0)
+
+```
+
+```{r}
+# --- 1. COSTRUISCI LA GRIGLIA (EPSG:3035) ---
+x <- ita@coords[,1]
+y <- ita@coords[,2]
+
+xi <- seq(min(x), max(x), by = 10000)  # passo 10 km
+yi <- seq(min(y), max(y), by = 10000)
+
+coords <- expand.grid(x = xi, y = yi)
+sp_points <- SpatialPoints(coords, proj4string = CRS(SRS_string = "EPSG:3035"))
+
+# --- 2. CARICA IL RASTER SLOPE ---
+slope_r <- raster("INGV_data/Slope_50")
+
+# --- 3. RIPROIEZIONE DELLA GRIGLIA NEL SISTEMA DEL RASTER ---
+sp_points_utm <- spTransform(sp_points, crs(slope_r))
+
+# --- 4. ESTRAZIONE DEI VALORI DELLA SLOPE ---
+slope_vals <- extract(slope_r, sp_points_utm)
+
+# --- 5. COSTRUZIONE DELLO SpatialPointsDataFrame CON LA COVARIATA ---
+cov_df <- data.frame(slope50_simple = slope_vals)
+
+grid_spdf <- SpatialPointsDataFrame(
+  coords = coords,
+  data   = cov_df,
+  proj4string = CRS(SRS_string = "EPSG:3035")
+)
+
+# --- 6. PULIZIA DEI NA ---
+grid_spdf_clean <- grid_spdf[!is.na(grid_spdf$slope50_simple), ]
+
+# ⬅️ Linea fondamentale per evitare il tuo errore
+proj4string(grid_spdf_clean) <- proj4string(ita)
+
+# --- 7. UNIVERSAL KRIGING CON SLOPE ---
+g.tr <- gstat(formula = dS2S_SA_T0_100 ~ slope50_simple,
+              data = ita, model = v.fit, set = list(gls=1))
+
+lz.uk <- predict(g.tr, grid_spdf_clean)
+
+# --- 8. VISUALIZZAZIONE DEL RISULTATO ---
+spplot(lz.uk["var1.pred"], main = "Universal Kriging with Slope only")
+
+```
+
+```{r}
+# Calcola la cross-validation
+cv <- krige.cv(
+  formula   = dS2S_SA_T0_100 ~ slope50_simple,
+  locations = ita,
+  model     = v.fit
+)
+
+sum(!is.na(cv@data[["var1.pred"]]))
+
+# Elimina righe con NA in var1.pred (cioè dove la predizione non è riuscita)
+cv_data <- cv@data[!is.na(cv@data[["var1.pred"]]), ]
+
+# Calcola gli errori
+cv_data$residual <- cv_data$observed - cv_data$var1.pred
+rmse <- sqrt(mean(cv_data$residual^2))
+mae  <- mean(abs(cv_data$residual))
+me   <- mean(cv_data$residual)
+loo_mse <- mean(cv_data$residual^2)
+
+
+# Mostra i risultati
+cat("✅ LOOCV results (solo punti validi):\n",
+    "RMSE =", round(rmse, 4), "\n",
+    "MAE  =", round(mae, 4), "\n",
+    "ME   =", round(me, 4), "\n",
+    "loo_mse   =", round(loo_mse, 4), "\n")
+
+```
+
+```{r}
+ita=ita_clean
+```
+
+# universal kringing slope + x + y + x\*y
+
+```{r}
+
+
+#-------------------------------------------------------------------
+ita_clean <- ita[!is.na(ita$slope50_simple), ]
+
+i=ita_clean
+ita_clean=ita
+ita=i
+# Estrai le coordinate
+coords <- coordinates(ita)
+
+# Aggiungile al data.frame
+ita@data$x  <- coords[, 1]
+ita@data$y  <- coords[, 2]
+
+FORMULA = formula(dS2S_SA_T0_100 ~ x+y+ I(x*y)+slope50_simple ) # a single constant predictor
+v= variogram(FORMULA, data=ita)
+# v0= variogram(FORMULA, data=df0)
+plot(v, main = 'Variogram', pch=19)
+plot(variogram(FORMULA, ita, alpha = c(0, 45, 90, 135)),pch=19) #They look similar, i.e. have isotropy (and most likely also stationarity)
+dev.off()
+
+#VARIOGRAM model: Sferico con nugget è coerente con i dati; Range iniziale ≈ 250 000 m; sill parziale ≈ 0.30; nugget ≈ 0.10;
+
+v1 = vgm(0.3, "Sph", 250000, 0.1) 
+v.fit <- fit.variogram(v, v1, fit.ranges = TRUE)
+plot(v, v.fit, pch = 19) #Very good at the beginning
+
+```
+
+```{r}
+# 1. Crea dataframe con coordinate e covariate
+s0_df <- data.frame(
+  x = 4200129,
+  y = 2160892,
+  slope50_simple = 5.503583
+)
+
+# 2. Crea tutte le covariate richieste dal modello
+s0_df$xy <- s0_df$x * s0_df$y
+
+# 3. Crea SpatialPointsDataFrame - le covariate devono stare in 'data'
+s0 <- SpatialPointsDataFrame(
+  coords = s0_df[, c("x", "y")],
+  data   = s0_df,  # include anche x, y, xy, slope50_simple
+  proj4string = CRS(SRS_string = "EPSG:3035")
+)
+
+# 4. Allinea il sistema di riferimento con 'ita'
+proj4string(s0) <- proj4string(ita)
+
+# 5. Crea il modello UK con tutte le covariate nel trend
+g.tr <- gstat(
+  formula = dS2S_SA_T0_100 ~ x+y + I(x * y) + slope50_simple,
+  data = ita,
+  model = v.fit,
+  nmax = 30, set = list(gls=1)
+)
+
+# 6. Predizione
+predict(g.tr, s0)
+
+```
+
+dovrebbe venire 0.3974495924
+
+```{r}
+# --- 1. COSTRUISCI LA GRIGLIA (EPSG:3035) ---
+x <- ita@coords[,1]
+y <- ita@coords[,2]
+
+xi <- seq(min(x), max(x), by = 10000)  # passo 10 km
+yi <- seq(min(y), max(y), by = 10000)
+
+coords <- expand.grid(x = xi, y = yi)
+sp_points <- SpatialPoints(coords, proj4string = CRS(SRS_string = "EPSG:3035"))
+
+# --- 2. CARICA IL RASTER SLOPE ---
+slope_r <- raster("INGV_data/Slope_50")
+
+# --- 3. RIPROIEZIONE DELLA GRIGLIA NEL CRS DEL RASTER ---
+sp_points_utm <- spTransform(sp_points, crs(slope_r))
+
+# --- 4. ESTRAZIONE DEI VALORI DELLA SLOPE ---
+slope_vals <- extract(slope_r, sp_points_utm)
+
+# --- 5. COSTRUISCI dataframe con tutte le covariate necessarie ---
+cov_df <- data.frame(
+  x = coords$x,
+  y = coords$y,
+  slope50_simple = slope_vals
+)
+cov_df$xy <- cov_df$x * cov_df$y
+
+# --- 6. CREA LO SpatialPointsDataFrame CON COVARIATE COMPLETE ---
+grid_spdf <- SpatialPointsDataFrame(
+  coords = coords,
+  data = cov_df,
+  proj4string = CRS(SRS_string = "EPSG:3035")
+)
+
+# --- 7. PULIZIA: rimuove punti con slope mancante ---
+grid_spdf_clean <- grid_spdf[!is.na(grid_spdf$slope50_simple), ]
+
+# --- 8. Allinea il sistema di riferimento ---
+proj4string(grid_spdf_clean) <- proj4string(ita)
+
+# --- 9. UNIVERSAL KRIGING CON TREND COMPLETO ---
+g.tr <- gstat(
+  formula = dS2S_SA_T0_100 ~ x+y+I(x*y) + slope50_simple,
+  data = ita,
+  model = v.fit, set = list(gls=1)
+)
+
+# --- 10. Predizione su griglia ---
+lz.uk <- predict(g.tr, grid_spdf_clean)
+
+# --- 11. Visualizzazione ---
+spplot(lz.uk["var1.pred"], main = "Universal Kriging with spatial trend + slope")
+
+```
+
+```{r}
+# --- 2. Definisci la formula con trend non-stazionario ---
+FORMULA <- dS2S_SA_T0_100 ~  x*y + slope50_simple
+
+# --- 3. Esegui Leave-One-Out Cross Validation (LOOCV) ---
+cv <- krige.cv(
+  formula   = FORMULA,
+  locations = ita,
+  model     = v.fit
+)
+
+# --- 4. Filtra i punti dove la predizione è andata a buon fine ---
+cv_data <- cv@data[!is.na(cv@data[["var1.pred"]]), ]
+
+# --- 5. Calcola gli errori ---
+cv_data$residual <- cv_data$observed - cv_data$var1.pred
+cv@data[["residual"]][cv@data[["residual"]]<10]
+rmse     <- sqrt(mean(cv_data$residual^2))
+mae      <- mean(abs(cv_data$residual))
+me       <- mean(cv_data$residual)
+loo_mse  <- mean(cv_data$residual^2)
+
+# --- 6. Mostra i risultati ---
+cat("✅ LOOCV results (solo punti validi):\n",
+    "RMSE     =", round(rmse, 4), "\n",
+    "MAE      =", round(mae, 4), "\n",
+    "ME       =", round(me, 4), "\n",
+    "LOO-MSE  =", round(loo_mse, 4), "\n",
+    "LOO-MSE (sci) =", format(loo_mse, scientific = TRUE, digits = 4), "\n")
+```
+
+# universal kringing Brunelli + slope
+
+```{r}
+ita=ita_clean
+
+#-------------------------------------------------------------------
+ita_clean <- ita[!is.na(ita$Vs30_Brunelli_simple) & !is.na(ita$slope50_simple), ]
+
+i=ita_clean
+ita_clean=ita
+ita=i
+FORMULA = formula(dS2S_SA_T0_100 ~ Vs30_Brunelli_simple+slope50_simple) # a single constant predictor
+v= variogram(FORMULA, data=ita)
+# v0= variogram(FORMULA, data=df0)
+plot(v, main = 'Variogram', pch=19)
+plot(variogram(FORMULA, ita, alpha = c(0, 45, 90, 135)),pch=19) #They look similar, i.e. have isotropy (and most likely also stationarity)
+dev.off()
+
+#VARIOGRAM model: Sferico con nugget è coerente con i dati; Range iniziale ≈ 250 000 m; sill parziale ≈ 0.30; nugget ≈ 0.10;
+
+v1 = vgm(0.3, "Sph", 250000, 0.1) 
+v.fit <- fit.variogram(v, v1, fit.ranges = TRUE)
+plot(v, v.fit, pch = 19) #Very good at the beginning
+
+```
+
+```{r}
+
+# 1. Crea dataframe con coordinate e covariate
+s0_df <- data.frame(
+  x = 4200129,
+  y = 2160892,
+  slope50_simple       = 5.503583,
+  Vs30_Brunelli_simple = 456.83  # <-- Sostituisci con il valore estratto dal raster
+)
+
+# 2. Crea tutte le covariate richieste dal modello
+s0_df$xy <- s0_df$x * s0_df$y
+
+# 3. Crea SpatialPointsDataFrame - le covariate devono stare in 'data'
+s0 <- SpatialPointsDataFrame(
+  coords = s0_df[, c("x", "y")],
+  data   = s0_df,  # contiene x, y, xy, slope, vs30
+  proj4string = CRS(SRS_string = "EPSG:3035")
+)
+
+# 4. Allinea il sistema di riferimento con 'ita'
+proj4string(s0) <- proj4string(ita)
+
+# 5. Crea il modello UK con tutte le covariate nel trend
+g.tr <- gstat(
+  formula = dS2S_SA_T0_100 ~ x + y + I(x * y) + slope50_simple + Vs30_Brunelli_simple,
+  data = ita,
+  model = v.fit,
+  nmax = 30, set = list(gls=1)
+)
+
+# 6. Predizione
+predict(g.tr, s0)
+
+```
+
+```{r}
+# --- 1. Carica i raster delle covariate ---
+slope_r  <- raster("INGV_data/Slope_50")
+vs30_r   <- raster("INGV_data/Vs30_Brunelli_new/vs30ms")
+
+# --- 2. Definisci il punto di predizione in long/lat ---
+s0_ll <- data.frame(x = 13.270813, y = 42.67157)
+coordinates(s0_ll) <- c("x", "y")
+proj4string(s0_ll) <- CRS("+proj=longlat +datum=WGS84")
+
+# --- 3. Trasforma il punto nel CRS dei raster (UTM33) ---
+s0_utm <- spTransform(s0_ll, crs(slope_r))  # assumendo CRS uguale per entrambi i raster
+
+# --- 4. Estrai i valori delle covariate ---
+slope_val <- extract(slope_r, s0_utm)
+vs30_val  <- extract(vs30_r, s0_utm)
+
+# --- 5. Trasforma il punto in EPSG:3035 per la predizione ---
+s0_proj <- spTransform(s0_ll, CRS(SRS_string = "EPSG:3035"))
+
+# --- 6. Crea dataframe con coordinate e covariate ---
+s0_df <- as.data.frame(coordinates(s0_proj))
+colnames(s0_df) <- c("x", "y")
+s0_df$slope50_simple       <- slope_val
+s0_df$Vs30_Brunelli_simple <- vs30_val
+s0_df$xy <- s0_df$x * s0_df$y  # solo se il modello lo richiede
+
+# --- 7. Crea lo SpatialPointsDataFrame coerente con 'ita' ---
+s0 <- SpatialPointsDataFrame(
+  coords = s0_df[, c("x", "y")],
+  data   = s0_df[, c("slope50_simple", "Vs30_Brunelli_simple", "xy")],  # aggiungi xy solo se presente nel modello
+  proj4string = CRS(proj4string(ita))
+)
+
+# --- 8. Predizione usando modello UK con entrambe le covariate ---
+# Assicurati che il tuo modello g.tr sia costruito con entrambe le covariate:
+# formula = dS2S_SA_T0_100 ~ x + y + I(x*y) + slope50_simple + Vs30_Brunelli_simple
+
+predict(g.tr, s0)
+
+
+```
+
+```{r}
+# 1. Crea griglia
+x <- ita@coords[,1]
+y <- ita@coords[,2]
+xi <- seq(min(x), max(x), by = 10000)
+yi <- seq(min(y), max(y), by = 10000)
+coords <- expand.grid(x = xi, y = yi)
+
+# 2. Trasforma in SpatialPoints
+sp_points <- SpatialPoints(coords, proj4string = CRS(SRS_string = "EPSG:3035"))
+
+# 3. Proietta in CRS dei raster per estrarre Vs30 e slope
+grid_utm <- spTransform(sp_points, crs(vs30_r))
+vs30_vals  <- extract(vs30_r,  grid_utm)
+slope_vals <- extract(slope_r, grid_utm)
+
+# 4. Crea SpatialPointsDataFrame con le covariate
+df_cov <- data.frame(Vs30_Brunelli_simple = vs30_vals,
+                     slope50_simple = slope_vals)
+grid_spdf <- SpatialPointsDataFrame(coords = coords, data = df_cov,
+                                     proj4string = CRS(SRS_string = "EPSG:3035"))
+
+# 5. Pulisci da NA
+grid_spdf_clean <- grid_spdf[!is.na(grid_spdf$Vs30_Brunelli_simple) &
+                             !is.na(grid_spdf$slope50_simple), ]
+grid_spdf_clean@data$dS2S_SA_T0_100 <- NULL
+
+# Forza stesso CRS
+proj4string(grid_spdf_clean) <- proj4string(ita)
+
+# Universal Kriging
+g.tr <- gstat(formula = dS2S_SA_T0_100 ~ Vs30_Brunelli_simple + slope50_simple,
+              data = ita, model = v.fit, set = list(gls=1))
+
+# Predizione
+lz.uk <- predict(g.tr, grid_spdf_clean)
+
+# Visualizzazione
+spplot(lz.uk["var1.pred"], main = "Universal Kriging with Vs30 + Slope")
+
+
+
+```
+
+```{r}
+# --- 2. Definisci la formula con trend non-stazionario ---
+FORMULA <- dS2S_SA_T0_100 ~  Vs30_Brunelli_simple + slope50_simple
+
+# --- 3. Esegui Leave-One-Out Cross Validation (LOOCV) ---
+cv <- krige.cv(
+  formula   = FORMULA,
+  locations = ita,
+  model     = v.fit
+)
+
+# --- 4. Filtra i punti dove la predizione è andata a buon fine ---
+cv_data <- cv@data[!is.na(cv@data[["var1.pred"]]), ]
+
+# --- 5. Calcola gli errori ---
+cv_data$residual <- cv_data$observed - cv_data$var1.pred
+rmse     <- sqrt(mean(cv_data$residual^2))
+mae      <- mean(abs(cv_data$residual))
+me       <- mean(cv_data$residual)
+loo_mse  <- mean(cv_data$residual^2)
+
+# --- 6. Mostra i risultati ---
+cat("✅ LOOCV results (solo punti validi):\n",
+    "RMSE     =", round(rmse, 4), "\n",
+    "MAE      =", round(mae, 4), "\n",
+    "ME       =", round(me, 4), "\n",
+    "LOO-MSE  =", round(loo_mse, 4), "\n",
+    "LOO-MSE (sci) =", format(loo_mse, scientific = TRUE, digits = 4), "\n")
+```
+
+# una serie di prove per leave one out cross validation
+
+```{r}
+#-------------------------------------------------------------------
+ita=ita_clean
+ita_clean <- ita[ !is.na(ita$Vs30_MORI_simple), ]
+
+i=ita_clean
+ita_clean=ita
+ita=i
+FORMULA = formula(dS2S_SA_T0_100 ~ Vs30_MORI_simple) # a single constant predictor
+v= variogram(FORMULA, data=ita)
+# v0= variogram(FORMULA, data=df0)
+plot(v, main = 'Variogram', pch=19)
+plot(variogram(FORMULA, ita, alpha = c(0, 45, 90, 135)),pch=19) #They look similar, i.e. have isotropy (and most likely also stationarity)
+dev.off()
+
+#VARIOGRAM model: Sferico con nugget è coerente con i dati; Range iniziale ≈ 250 000 m; sill parziale ≈ 0.30; nugget ≈ 0.10;
+
+v1 = vgm(0.3, "Sph", 250000, 0.1) 
+v.fit <- fit.variogram(v, v1, fit.ranges = TRUE)
+plot(v, v.fit, pch = 19) #Very good at the beginning
+
+```
+
+```{r}
+# --- LOOCV: Leave-One-Out Cross Validation ---
+
+# Verifica che ita_clean sia ancora oggetto spaziale
+if (!inherits(ita_clean, "Spatial")) {
+  coordinates(ita_clean) <- ~x + y
+}
+
+# Esegui LOOCV
+cv <- krige.cv(
+  formula   = FORMULA,
+  locations = ita,
+  model     = v.fit  # puoi abbassare se necessario
+)
+
+sum(is.na(cv@data$var1.pred))
+# Verifica se ci sono predizioni valide
+if (nrow(cv@data[!is.na(cv@data$var1.pred), ]) == 0) {
+  stop("❌ Nessuna predizione valida trovata in LOOCV. Controlla il modello variografico o le covariate.")
+}
+
+# Estrai le predizioni corrette
+cv_data <- cv@data[!is.na(cv@data$var1.pred), ]
+cv_data$residual <- cv_data$observed - cv_data$var1.pred
+
+# Calcola gli errori
+rmse     <- sqrt(mean(cv_data$residual^2))
+mae      <- mean(abs(cv_data$residual))
+me       <- mean(cv_data$residual)
+loo_mse  <- mean(cv_data$residual^2)
+sd_res  <- sd(cv_data$residual)  # <--- aggiunta deviazione standard
+varname="dS2S_SA_T0_100"
+  # Risultati
+cat("✅ LOOCV results per", varname, ":\n",
+      "RMSE     =", round(rmse, 4), "\n",
+      "MAE      =", round(mae, 4), "\n",
+      "ME       =", round(me, 4), "\n",
+      "SD       =", round(sd_res, 4), "\n",
+      "LOO-MSE  =", round(loo_mse, 4), "\n",
+      "LOO-MSE (sci) =", format(loo_mse, scientific = TRUE, digits = 4), "\n")
+```
+
+formula(dS2S_SA_T0_100 \~ Vs30_MORI_simple+Vs30_Brunelli_simple+slope50_simple)
+
+```{r}
+#-------------------------------------------------------------------
+ita_clean <- ita[!is.na(ita$Vs30_Brunelli_simple) & !is.na(ita$slope50_simple) & !is.na(ita$Vs30_MORI_simple), ]
+
+i=ita_clean
+ita_clean=ita
+ita=i
+FORMULA = formula(dS2S_SA_T0_100 ~ Vs30_MORI_simple+Vs30_Brunelli_simple+slope50_simple) # a single constant predictor
+v= variogram(FORMULA, data=ita)
+# v0= variogram(FORMULA, data=df0)
+plot(v, main = 'Variogram', pch=19)
+plot(variogram(FORMULA, ita, alpha = c(0, 45, 90, 135)),pch=19) #They look similar, i.e. have isotropy (and most likely also stationarity)
+dev.off()
+
+#VARIOGRAM model: Sferico con nugget è coerente con i dati; Range iniziale ≈ 250 000 m; sill parziale ≈ 0.30; nugget ≈ 0.10;
+
+v1 = vgm(0.3, "Sph", 250000, 0.1) 
+v.fit <- fit.variogram(v, v1, fit.ranges = TRUE)
+plot(v, v.fit, pch = 19) #Very good at the beginning
+
+```
+
+```{r}
+# --- LOOCV: Leave-One-Out Cross Validation ---
+
+# Verifica che ita_clean sia ancora oggetto spaziale
+if (!inherits(ita_clean, "Spatial")) {
+  coordinates(ita_clean) <- ~x + y
+}
+
+# Esegui LOOCV
+cv <- krige.cv(
+  formula   = FORMULA,
+  locations = ita,
+  model     = v.fit  # puoi abbassare se necessario
+)
+
+sum(is.na(cv@data$var1.pred))
+# Verifica se ci sono predizioni valide
+if (nrow(cv@data[!is.na(cv@data$var1.pred), ]) == 0) {
+  stop("❌ Nessuna predizione valida trovata in LOOCV. Controlla il modello variografico o le covariate.")
+}
+
+# Estrai le predizioni corrette
+cv_data <- cv@data[!is.na(cv@data$var1.pred), ]
+cv_data$residual <- cv_data$observed - cv_data$var1.pred
+
+# Calcola gli errori
+rmse     <- sqrt(mean(cv_data$residual^2))
+mae      <- mean(abs(cv_data$residual))
+me       <- mean(cv_data$residual)
+loo_mse  <- mean(cv_data$residual^2)
+sd_res  <- sd(cv_data$residual)  # <--- aggiunta deviazione standard
+varname="dS2S_SA_T0_100"
+  # Risultati
+cat("✅ LOOCV results per", varname, ":\n",
+      "RMSE     =", round(rmse, 4), "\n",
+      "MAE      =", round(mae, 4), "\n",
+      "ME       =", round(me, 4), "\n",
+      "SD       =", round(sd_res, 4), "\n",
+      "LOO-MSE  =", round(loo_mse, 4), "\n",
+      "LOO-MSE (sci) =", format(loo_mse, scientific = TRUE, digits = 4), "\n")
+```
+
+FORMULA \<- dS2S_SA_T0_100 \~ depth_to_bedrock + Vs30_Brunelli_simple + slope50_simple
+
+```{r}
+# Assegna i dati originali
+ita <- ita_clean
+
+# Filtro per rimuovere gli NA nelle covariate
+ita_clean <- ita[!is.na(ita$Vs30_Brunelli_simple) &
+                 !is.na(ita$slope50_simple)  &
+                 !is.na(ita$depth_to_bedrock), ]
+
+# Se vuoi conservare ita, puoi fare così:
+i <- ita_clean
+ita_clean <- ita
+ita <- i
+
+# Assicurati che ita sia un oggetto spaziale
+if (!inherits(ita, "Spatial")) {
+  coordinates(ita) <- ~x + y
+}
+
+# Definizione formula
+FORMULA <- dS2S_SA_T0_100 ~ depth_to_bedrock + Vs30_Brunelli_simple + slope50_simple
+
+# Calcolo variogramma
+v <- variogram(FORMULA, data = ita)
+plot(v, main = 'Variogram', pch = 19)
+
+# Analisi anisotropica
+plot(variogram(FORMULA, ita, alpha = c(0, 45, 90, 135)), pch = 19)
+
+# Modello teorico sferico iniziale
+v1 <- vgm(0.3, "Sph", 250000, 0.1)
+v.fit <- fit.variogram(v, v1, fit.ranges = TRUE)
+
+# Plot con modello adattato
+plot(v, v.fit, pch = 19)
+
+# Chiudi grafico (opzionale)
+dev.off()
+
+```
+
+```{r}
+# --- LOOCV: Leave-One-Out Cross Validation ---
+
+# Verifica che ita_clean sia ancora oggetto spaziale
+if (!inherits(ita_clean, "Spatial")) {
+  coordinates(ita_clean) <- ~x + y
+}
+
+# Esegui LOOCV
+cv <- krige.cv(
+  formula   = FORMULA,
+  locations = ita,
+  model     = v.fit
+)
+
+sum(is.na(cv@data$var1.pred))
+# Verifica se ci sono predizioni valide
+if (nrow(cv@data[!is.na(cv@data$var1.pred), ]) == 0) {
+  stop("❌ Nessuna predizione valida trovata in LOOCV. Controlla il modello variografico o le covariate.")
+}
+
+# Estrai le predizioni corrette
+cv_data <- cv@data[!is.na(cv@data$var1.pred), ]
+cv_data$residual <- cv_data$observed - cv_data$var1.pred
+
+# Calcola gli errori
+rmse     <- sqrt(mean(cv_data$residual^2))
+mae      <- mean(abs(cv_data$residual))
+me       <- mean(cv_data$residual)
+loo_mse  <- mean(cv_data$residual^2)
+sd_res  <- sd(cv_data$residual)  # <--- aggiunta deviazione standard
+
+  # Risultati
+cat("✅ LOOCV results per", varname, ":\n",
+      "RMSE     =", round(rmse, 4), "\n",
+      "MAE      =", round(mae, 4), "\n",
+      "ME       =", round(me, 4), "\n",
+      "SD       =", round(sd_res, 4), "\n",
+      "LOO-MSE  =", round(loo_mse, 4), "\n",
+      "LOO-MSE (sci) =", format(loo_mse, scientific = TRUE, digits = 4), "\n")
+```
+
+FORMULA \<- dS2S_SA_T0_100 \~ depth_to_bedrock
+
+```{r}
+# Assegna i dati originali
+ita <- ita_clean
+
+# Filtro per rimuovere gli NA nelle covariate
+ita_clean <- ita[!is.na(ita$Vs30_Brunelli_simple) &
+                 !is.na(ita$slope50_simple)  &
+                 !is.na(ita$depth_to_bedrock), ]
+
+# Se vuoi conservare ita, puoi fare così:
+i <- ita_clean
+ita_clean <- ita
+ita <- i
+
+# Assicurati che ita sia un oggetto spaziale
+if (!inherits(ita, "Spatial")) {
+  coordinates(ita) <- ~x + y
+}
+
+# Definizione formula
+FORMULA <- dS2S_SA_T0_100 ~ depth_to_bedrock 
+
+# Calcolo variogramma
+v <- variogram(FORMULA, data = ita)
+plot(v, main = 'Variogram', pch = 19)
+
+# Analisi anisotropica
+plot(variogram(FORMULA, ita, alpha = c(0, 45, 90, 135)), pch = 19)
+
+# Modello teorico sferico iniziale
+v1 <- vgm(0.3, "Sph", 250000, 0.1)
+v.fit <- fit.variogram(v, v1, fit.ranges = TRUE)
+
+# Plot con modello adattato
+plot(v, v.fit, pch = 19)
+
+# Chiudi grafico (opzionale)
+dev.off()
+```
+
+```{r}
+# --- LOOCV: Leave-One-Out Cross Validation ---
+
+# Verifica che ita_clean sia ancora oggetto spaziale
+if (!inherits(ita_clean, "Spatial")) {
+  coordinates(ita_clean) <- ~x + y
+}
+
+# Esegui LOOCV
+cv <- krige.cv(
+  formula   = FORMULA,
+  locations = ita,
+  model     = v.fit  
+)
+
+# Verifica se ci sono predizioni valide
+if (nrow(cv@data[!is.na(cv@data$var1.pred), ]) == 0) {
+  stop("❌ Nessuna predizione valida trovata in LOOCV. Controlla il modello variografico o le covariate.")
+}
+
+sum(is.na(cv@data$var1.pred))
+# Estrai le predizioni corrette
+cv_data <- cv@data[!is.na(cv@data$var1.pred), ]
+cv_data$residual <- cv_data$observed - cv_data$var1.pred
+
+# Calcola gli errori
+rmse     <- sqrt(mean(cv_data$residual^2))
+mae      <- mean(abs(cv_data$residual))
+me       <- mean(cv_data$residual)
+loo_mse  <- mean(cv_data$residual^2)
+sd_res  <- sd(cv_data$residual)  # <--- aggiunta deviazione standard
+
+  # Risultati
+cat("✅ LOOCV results per", varname, ":\n",
+      "RMSE     =", round(rmse, 4), "\n",
+      "MAE      =", round(mae, 4), "\n",
+      "ME       =", round(me, 4), "\n",
+      "SD       =", round(sd_res, 4), "\n",
+      "LOO-MSE  =", round(loo_mse, 4), "\n",
+      "LOO-MSE (sci) =", format(loo_mse, scientific = TRUE, digits = 4), "\n")
+```
+
+vs30 brunelli + coordinates
+
+```{r}
+ita <- ita_clean
+#-------------------------------------------------------------------
+ita_clean <- ita[!is.na(ita$Vs30_Brunelli_simple), ]
+
+i=ita_clean
+ita_clean=ita
+ita=i
+# Estrai le coordinate
+coords <- coordinates(ita)
+
+# Aggiungile al data.frame
+ita@data$x  <- coords[, 1]
+ita@data$y  <- coords[, 2]
+
+FORMULA = formula(dS2S_SA_T0_100 ~ x*y+Vs30_Brunelli_simple) # a single constant predictor
+v= variogram(FORMULA, data=ita)
+# v0= variogram(FORMULA, data=df0)
+plot(v, main = 'Variogram', pch=19)
+plot(variogram(FORMULA, ita, alpha = c(0, 45, 90, 135)),pch=19) #They look similar, i.e. have isotropy (and most likely also stationarity)
+dev.off()
+
+#VARIOGRAM model: Sferico con nugget è coerente con i dati; Range iniziale ≈ 250 000 m; sill parziale ≈ 0.30; nugget ≈ 0.10;
+
+v1 = vgm(0.3, "Sph", 250000, 0.1) 
+v.fit <- fit.variogram(v, v1, fit.ranges = TRUE)
+plot(v, v.fit, pch = 19) #Very good at the beginning
+
+```
+
+```{r}
+# --- LOOCV: Leave-One-Out Cross Validation ---
+
+# Verifica che ita_clean sia ancora oggetto spaziale
+if (!inherits(ita_clean, "Spatial")) {
+  coordinates(ita_clean) <- ~x + y
+}
+
+# Esegui LOOCV
+cv <- krige.cv(
+  formula   = FORMULA,
+  locations = ita,
+  model     = v.fit
+)
+
+# Verifica se ci sono predizioni valide
+if (nrow(cv@data[!is.na(cv@data$var1.pred), ]) == 0) {
+  stop("❌ Nessuna predizione valida trovata in LOOCV. Controlla il modello variografico o le covariate.")
+}
+
+sum(is.na(cv@data$var1.pred))
+
+# Estrai le predizioni corrette
+cv_data <- cv@data[!is.na(cv@data$var1.pred), ]
+cv_data$residual <- cv_data$observed - cv_data$var1.pred
+sum(cv_data$residual < 5 & cv_data$residual > -5)
+a <- cv_data$residual[cv_data$residual < 2 & cv_data$residual > -2]
+
+
+# Calcola gli errori
+rmse     <- sqrt(mean(a^2))
+mae      <- mean(abs(a))
+me       <- mean(a)
+loo_mse  <- mean(a^2)
+sd_res  <- sd(cv_data$residual)  # <--- aggiunta deviazione standard
+
+  # Risultati
+cat("✅ LOOCV results per", varname, ":\n",
+      "RMSE     =", round(rmse, 4), "\n",
+      "MAE      =", round(mae, 4), "\n",
+      "ME       =", round(me, 4), "\n",
+      "SD       =", round(sd_res, 4), "\n",
+      "LOO-MSE  =", round(loo_mse, 4), "\n",
+      "LOO-MSE (sci) =", format(loo_mse, scientific = TRUE, digits = 4), "\n")
+```
+
+(1/slope50_simple) + sqrt(Vs30_Brunelli_simple)+1/depth_to_bedrock
+
+```{r}
+ita <- ita_clean
+#-------------------------------------------------------------------
+# Filtro per rimuovere gli NA nelle covariate
+ita_clean <- ita[!is.na(ita$Vs30_Brunelli_simple) &
+                 !is.na(ita$slope50_simple)  &
+                 !is.na(ita$depth_to_bedrock), ]
+
+i=ita_clean
+ita_clean=ita
+ita=i
+# Estrai le coordinate
+coords <- coordinates(ita)
+
+# Aggiungile al data.frame
+ita@data$x  <- coords[, 1]
+ita@data$y  <- coords[, 2]
+
+FORMULA = formula(dS2S_SA_T0_100 ~ (1/slope50_simple)  + sqrt(Vs30_Brunelli_simple)+1/depth_to_bedrock ) # a single constant predictor
+v= variogram(FORMULA, data=ita)
+# v0= variogram(FORMULA, data=df0)
+plot(v, main = 'Variogram', pch=19)
+plot(variogram(FORMULA, ita, alpha = c(0, 45, 90, 135)),pch=19) #They look similar, i.e. have isotropy (and most likely also stationarity)
+dev.off()
+
+#VARIOGRAM model: Sferico con nugget è coerente con i dati; Range iniziale ≈ 250 000 m; sill parziale ≈ 0.30; nugget ≈ 0.10;
+
+v1 = vgm(0.3, "Sph", 250000, 0.1) 
+v.fit <- fit.variogram(v, v1, fit.ranges = TRUE)
+plot(v, v.fit, pch = 19) #Very good at the beginning
+
+```
+
+```{r}
+# --- LOOCV: Leave-One-Out Cross Validation ---
+
+# Verifica che ita_clean sia ancora oggetto spaziale
+if (!inherits(ita_clean, "Spatial")) {
+  coordinates(ita_clean) <- ~x + y
+}
+
+# Esegui LOOCV
+cv <- krige.cv(
+  formula   = FORMULA,
+  locations = ita,
+  model     = v.fit  # puoi abbassare se necessario
+)
+
+sum(!is.na(cv@data[["var1.pred"]]))
+
+# Elimina righe con NA in var1.pred (cioè dove la predizione non è riuscita)
+cv_data <- cv@data[!is.na(cv@data[["var1.pred"]]), ]
+
+# Calcola gli errori
+cv_data$residual <- cv_data$observed - cv_data$var1.pred
+rmse     <- sqrt(mean(cv_data$residual^2))
+mae      <- mean(abs(cv_data$residual))
+me       <- mean(cv_data$residual)
+loo_mse  <- mean(cv_data$residual^2)
+loo_sd   <- sd(cv_data$residual)  # Deviazione standard degli errori LOO
+sd_res  <- sd(cv_data$residual)  # <--- aggiunta deviazione standard
+
+  # Risultati
+cat("✅ LOOCV results per", varname, ":\n",
+      "RMSE     =", round(rmse, 4), "\n",
+      "MAE      =", round(mae, 4), "\n",
+      "ME       =", round(me, 4), "\n",
+      "SD       =", round(sd_res, 4), "\n",
+      "LOO-MSE  =", round(loo_mse, 4), "\n",
+      "LOO-MSE (sci) =", format(loo_mse, scientific = TRUE, digits = 4), "\n")
+
+
+```
+
+dS2S_SA_T0_100 \~ (Vs30_Brunelli_simple)
+
+```{r}
+ita <- ita_clean
+#-------------------------------------------------------------------
+# Filtro per rimuovere gli NA nelle covariate
+ita_clean <- ita[!is.na(ita$Vs30_Brunelli_simple) &
+                 !is.na(ita$slope50_simple)  &
+                 !is.na(ita$depth_to_bedrock), ]
+
+i=ita_clean
+ita_clean=ita
+ita=i
+# Estrai le coordinate
+coords <- coordinates(ita)
+
+# Aggiungile al data.frame
+ita@data$x  <- coords[, 1]
+ita@data$y  <- coords[, 2]
+
+FORMULA = formula(dS2S_SA_T0_100 ~  (Vs30_Brunelli_simple)) # a single constant predictor
+v= variogram(FORMULA, data=ita)
+# v0= variogram(FORMULA, data=df0)
+plot(v, main = 'Variogram', pch=19)
+plot(variogram(FORMULA, ita, alpha = c(0, 45, 90, 135)),pch=19) #They look similar, i.e. have isotropy (and most likely also stationarity)
+dev.off()
+
+#VARIOGRAM model: Sferico con nugget è coerente con i dati; Range iniziale ≈ 250 000 m; sill parziale ≈ 0.30; nugget ≈ 0.10;
+
+v1 = vgm(0.3, "Sph", 250000, 0.1) 
+v.fit <- fit.variogram(v, v1, fit.ranges = TRUE)
+plot(v, v.fit, pch = 19) #Very good at the beginning
+
+```
+
+```{r}
+# --- LOOCV: Leave-One-Out Cross Validation ---
+
+# Verifica che ita_clean sia ancora oggetto spaziale
+if (!inherits(ita_clean, "Spatial")) {
+  coordinates(ita_clean) <- ~x + y
+}
+
+# Esegui LOOCV
+cv <- krige.cv(
+  formula   = FORMULA,
+  locations = ita,
+  model     = v.fit  # puoi abbassare se necessario
+)
+
+# Verifica se ci sono predizioni valide
+if (nrow(cv@data[!is.na(cv@data$var1.pred), ]) == 0) {
+  stop("❌ Nessuna predizione valida trovata in LOOCV. Controlla il modello variografico o le covariate.")
+}
+
+sum(is.na(cv@data$var1.pred))
+
+# Calcola gli errori
+cv_data$residual <- cv_data$observed - cv_data$var1.pred
+rmse     <- sqrt(mean(cv_data$residual^2))
+mae      <- mean(abs(cv_data$residual))
+me       <- mean(cv_data$residual)
+loo_mse  <- mean(cv_data$residual^2)
+loo_sd   <- sd(cv_data$residual)  # Deviazione standard degli errori LOO
+sd_res  <- sd(cv_data$residual)  # <--- aggiunta deviazione standard
+
+  # Risultati
+cat("✅ LOOCV results per", varname, ":\n",
+      "RMSE     =", round(rmse, 4), "\n",
+      "MAE      =", round(mae, 4), "\n",
+      "ME       =", round(me, 4), "\n",
+      "SD       =", round(sd_res, 4), "\n",
+      "LOO-MSE  =", round(loo_mse, 4), "\n",
+      "LOO-MSE (sci) =", format(loo_mse, scientific = TRUE, digits = 4), "\n")
+
+```
+
+dS2S_SA_T0_100 \~ (1/slope50_simple) + sqrt(Vs30_Brunelli_simple)
+
+```{r}
+ita <- ita_clean
+#-------------------------------------------------------------------
+# Filtro per rimuovere gli NA nelle covariate
+ita_clean <- ita[!is.na(ita$Vs30_Brunelli_simple) &
+                 !is.na(ita$slope50_simple)  &
+                 !is.na(ita$depth_to_bedrock), ]
+
+i=ita_clean
+ita_clean=ita
+ita=i
+# Estrai le coordinate
+coords <- coordinates(ita)
+
+# Aggiungile al data.frame
+ita@data$x  <- coords[, 1]
+ita@data$y  <- coords[, 2]
+
+FORMULA = formula(dS2S_SA_T0_100 ~ (1/slope50_simple)  + sqrt(Vs30_Brunelli_simple)) # a single constant predictor
+v= variogram(FORMULA, data=ita)
+# v0= variogram(FORMULA, data=df0)
+plot(v, main = 'Variogram', pch=19)
+plot(variogram(FORMULA, ita, alpha = c(0, 45, 90, 135)),pch=19) #They look similar, i.e. have isotropy (and most likely also stationarity)
+dev.off()
+
+#VARIOGRAM model: Sferico con nugget è coerente con i dati; Range iniziale ≈ 250 000 m; sill parziale ≈ 0.30; nugget ≈ 0.10;
+
+v1 = vgm(0.3, "Sph", 250000, 0.1) 
+v.fit <- fit.variogram(v, v1, fit.ranges = TRUE)
+plot(v, v.fit, pch = 19) #Very good at the beginning
+
+```
+
+```{r}
+# --- LOOCV: Leave-One-Out Cross Validation ---
+
+# Verifica che ita_clean sia ancora oggetto spaziale
+if (!inherits(ita_clean, "Spatial")) {
+  coordinates(ita_clean) <- ~x + y
+}
+
+# Esegui LOOCV
+cv <- krige.cv(
+  formula   = FORMULA,
+  locations = ita,
+  model     = v.fit  # puoi abbassare se necessario
+)
+
+sum(!is.na(cv@data[["var1.pred"]]))
+
+# Elimina righe con NA in var1.pred (cioè dove la predizione non è riuscita)
+cv_data <- cv@data[!is.na(cv@data[["var1.pred"]]), ]
+
+# Calcola gli errori
+cv_data$residual <- cv_data$observed - cv_data$var1.pred
+rmse     <- sqrt(mean(cv_data$residual^2))
+mae      <- mean(abs(cv_data$residual))
+me       <- mean(cv_data$residual)
+loo_mse  <- mean(cv_data$residual^2)
+loo_sd   <- sd(cv_data$residual)  # Deviazione standard degli errori LOO
+sd_res  <- sd(cv_data$residual)  # <--- aggiunta deviazione standard
+
+  # Risultati
+cat("✅ LOOCV results per", varname, ":\n",
+      "RMSE     =", round(rmse, 4), "\n",
+      "MAE      =", round(mae, 4), "\n",
+      "ME       =", round(me, 4), "\n",
+      "SD       =", round(sd_res, 4), "\n",
+      "LOO-MSE  =", round(loo_mse, 4), "\n",
+      "LOO-MSE (sci) =", format(loo_mse, scientific = TRUE, digits = 4), "\n")
+
+
+```
+
+(1/slope50_simple) + sqrt(Vs30_Brunelli_simple)+x\*y
+
+```{r}
+ita <- ita_clean
+#-------------------------------------------------------------------
+# Filtro per rimuovere gli NA nelle covariate
+ita_clean <- ita[!is.na(ita$Vs30_Brunelli_simple) &
+                 !is.na(ita$slope50_simple)  &
+                 !is.na(ita$depth_to_bedrock), ]
+
+i=ita_clean
+ita_clean=ita
+ita=i
+# Estrai le coordinate
+coords <- coordinates(ita)
+
+# Aggiungile al data.frame
+ita@data$x  <- coords[, 1]
+ita@data$y  <- coords[, 2]
+
+FORMULA = formula(dS2S_SA_T0_100 ~ (1/slope50_simple)  + sqrt(Vs30_Brunelli_simple)+x*y) # a single constant predictor
+v= variogram(FORMULA, data=ita)
+# v0= variogram(FORMULA, data=df0)
+plot(v, main = 'Variogram', pch=19)
+plot(variogram(FORMULA, ita, alpha = c(0, 45, 90, 135)),pch=19) #They look similar, i.e. have isotropy (and most likely also stationarity)
+dev.off()
+
+#VARIOGRAM model: Sferico con nugget è coerente con i dati; Range iniziale ≈ 250 000 m; sill parziale ≈ 0.30; nugget ≈ 0.10;
+
+v1 = vgm(0.3, "Sph", 250000, 0.1) 
+v.fit <- fit.variogram(v, v1, fit.ranges = TRUE)
+plot(v, v.fit, pch = 19) #Very good at the beginning
+```
+
+```{r}
+# --- LOOCV: Leave-One-Out Cross Validation ---
+
+# Verifica che ita_clean sia ancora oggetto spaziale
+if (!inherits(ita_clean, "Spatial")) {
+  coordinates(ita_clean) <- ~x + y
+}
+
+# Esegui LOOCV
+cv <- krige.cv(
+  formula   = FORMULA,
+  locations = ita,
+  model     = v.fit  # puoi abbassare se necessario
+)
+
+sum(!is.na(cv@data[["var1.pred"]]))
+
+# Elimina righe con NA in var1.pred (cioè dove la predizione non è riuscita)
+cv_data <- cv@data[!is.na(cv@data[["var1.pred"]]), ]
+
+# Calcola gli errori
+cv_data$residual <- cv_data$observed - cv_data$var1.pred
+rmse     <- sqrt(mean(cv_data$residual^2))
+mae      <- mean(abs(cv_data$residual))
+me       <- mean(cv_data$residual)
+loo_mse  <- mean(cv_data$residual^2)
+loo_sd   <- sd(cv_data$residual)  # Deviazione standard degli errori LOO
+sd_res  <- sd(cv_data$residual)  # <--- aggiunta deviazione standard
+
+  # Risultati
+cat("✅ LOOCV results per", varname, ":\n",
+      "RMSE     =", round(rmse, 4), "\n",
+      "MAE      =", round(mae, 4), "\n",
+      "ME       =", round(me, 4), "\n",
+      "SD       =", round(sd_res, 4), "\n",
+      "LOO-MSE  =", round(loo_mse, 4), "\n",
+      "LOO-MSE (sci) =", format(loo_mse, scientific = TRUE, digits = 4), "\n")
+
+
+```
+
+```         
+✅ LOOCV results per dS2S_SA_T0_100 :
+ RMSE     = 0.5959 
+ MAE      = 0.4651 
+ ME       = -0.0031 
+ SD       = 0.5977 
+ LOO-MSE  = 0.3551 
+ LOO-MSE (sci) = 3.551e-01 
+Modify Chunk OptionsRun All Chunks AboveRun Current Chunk
+```
+
+sqrt(slope50_simple) + sqrt(Vs30_Brunelli_simple)
+
+```{r}
+ita <- ita_clean
+#-------------------------------------------------------------------
+# Filtro per rimuovere gli NA nelle covariate
+ita_clean <- ita[!is.na(ita$Vs30_Brunelli_simple) &
+                 !is.na(ita$slope50_simple)  &
+                 !is.na(ita$depth_to_bedrock), ]
+
+i=ita_clean
+ita_clean=ita
+ita=i
+
+# Estrai le coordinate
+coords <- coordinates(ita)
+
+# Aggiungile al data.frame
+ita@data$x  <- coords[, 1]
+ita@data$y  <- coords[, 2]
+
+FORMULA = formula(dS2S_SA_T0_100 ~ x+y+ I(x*y)+slope50_simple) # a single constant predictor
+v= variogram(FORMULA, data=ita)
+# v0= variogram(FORMULA, data=df0)
+plot(v, main = 'Variogram', pch=19)
+plot(variogram(FORMULA, ita, alpha = c(0, 45, 90, 135)),pch=19) #They look similar, i.e. have isotropy (and most likely also stationarity)
+dev.off()
+
+#VARIOGRAM model: Sferico con nugget è coerente con i dati; Range iniziale ≈ 250 000 m; sill parziale ≈ 0.30; nugget ≈ 0.10;
+
+v1 = vgm(0.3, "Sph", 250000, 0.1) 
+v.fit <- fit.variogram(v, v1, fit.ranges = TRUE)
+plot(v, v.fit, pch = 19) #Very good at the beginning
+
+# Estrai le coordinate
+coords <- coordinates(ita)
+
+# Aggiungile al data.frame
+ita@data$x  <- coords[, 1]
+ita@data$y  <- coords[, 2]
+
+FORMULA = formula(dS2S_SA_T0_100 ~ sqrt(slope50_simple)  + sqrt(Vs30_Brunelli_simple)) # a single constant predictor
+v= variogram(FORMULA, data=ita)
+# v0= variogram(FORMULA, data=df0)
+plot(v, main = 'Variogram', pch=19)
+plot(variogram(FORMULA, ita, alpha = c(0, 45, 90, 135)),pch=19) #They look similar, i.e. have isotropy (and most likely also stationarity)
+dev.off()
+
+#VARIOGRAM model: Sferico con nugget è coerente con i dati; Range iniziale ≈ 250 000 m; sill parziale ≈ 0.30; nugget ≈ 0.10;
+
+v1 = vgm(0.3, "Sph", 250000, 0.1) 
+v.fit <- fit.variogram(v, v1, fit.ranges = TRUE)
+plot(v, v.fit, pch = 19) #Very good at the beginning
+```
+
+```{r}
+# --- LOOCV: Leave-One-Out Cross Validation ---
+
+# Verifica che ita_clean sia ancora oggetto spaziale
+if (!inherits(ita_clean, "Spatial")) {
+  coordinates(ita_clean) <- ~x + y
+}
+
+# Esegui LOOCV
+cv <- krige.cv(
+  formula   = FORMULA,
+  locations = ita,
+  model     = v.fit  # puoi abbassare se necessario
+)
+
+# Verifica se ci sono predizioni valide
+if (nrow(cv@data[!is.na(cv@data$var1.pred), ]) == 0) {
+  stop("❌ Nessuna predizione valida trovata in LOOCV. Controlla il modello variografico o le covariate.")
+}
+
+sum(is.na(cv@data$var1.pred))
+
+# Estrai le predizioni corrette
+cv_data <- cv@data[!is.na(cv@data$var1.pred), ]
+cv_data$residual <- cv_data$observed - cv_data$var1.pred
+sum(cv_data$residual < 5 & cv_data$residual > -5)
+a <- cv_data$residual[cv_data$residual < 2 & cv_data$residual > -2]
+
+
+# Calcola gli errori
+rmse     <- sqrt(mean(a^2))
+mae      <- mean(abs(a))
+me       <- mean(a)
+loo_mse  <- mean(a^2)
+sd_res  <- sd(cv_data$residual)  # <--- aggiunta deviazione standard
+
+  # Risultati
+cat("✅ LOOCV results per", varname, ":\n",
+      "RMSE     =", round(rmse, 4), "\n",
+      "MAE      =", round(mae, 4), "\n",
+      "ME       =", round(me, 4), "\n",
+      "SD       =", round(sd_res, 4), "\n",
+      "LOO-MSE  =", round(loo_mse, 4), "\n",
+      "LOO-MSE (sci) =", format(loo_mse, scientific = TRUE, digits = 4), "\n")
+
+```
+
+# Lito classes
+
+```{r}
+ita <- ita_clean
+#-------------------------------------------------------------------
+# Filtro per rimuovere gli NA nelle covariate
+ita_clean <- ita_clean[
+  !is.na(ita_clean$Vs30_Brunelli_simple) &
+  !is.na(ita_clean$slope50_simple) &
+  ita_clean$Lito_Bucci_simple %in% c(1, 6, 7, 8), 
+]
+
+i=ita_clean
+ita_clean=ita
+ita=i
+# Estrai le coordinate
+coords <- coordinates(ita)
+
+# Aggiungile al data.frame
+ita@data$x  <- coords[, 1]
+ita@data$y  <- coords[, 2]
+
+FORMULA = formula(dS2S_SA_T0_100 ~ (1/slope50_simple)+sqrt(Vs30_Brunelli_simple)) # a single constant predictor
+v= variogram(FORMULA, data=ita)
+# v0= variogram(FORMULA, data=df0)
+plot(v, main = 'Variogram', pch=19)
+plot(variogram(FORMULA, ita, alpha = c(0, 45, 90, 135)),pch=19) #They look similar, i.e. have isotropy (and most likely also stationarity)
+dev.off()
+
+#VARIOGRAM model: Sferico con nugget è coerente con i dati; Range iniziale ≈ 250 000 m; sill parziale ≈ 0.30; nugget ≈ 0.10;
+
+v1 = vgm(0.3, "Sph", 250000, 0.1) 
+v.fit <- fit.variogram(v, v1, fit.ranges = TRUE)
+plot(v, v.fit, pch = 19) #Very good at the beginning
+```
+
+```{r}
+# --- LOOCV: Leave-One-Out Cross Validation ---
+
+# Verifica che ita_clean sia ancora oggetto spaziale
+if (!inherits(ita_clean, "Spatial")) {
+  coordinates(ita_clean) <- ~x + y
+}
+
+# Esegui LOOCV
+cv <- krige.cv(
+  formula   = FORMULA,
+  locations = ita,
+  model     = v.fit  # puoi abbassare se necessario
+)
+
+sum(!is.na(cv@data[["var1.pred"]]))
+
+# Elimina righe con NA in var1.pred (cioè dove la predizione non è riuscita)
+cv_data <- cv@data[!is.na(cv@data[["var1.pred"]]), ]
+
+# Calcola gli errori
+cv_data$residual <- cv_data$observed - cv_data$var1.pred
+rmse     <- sqrt(mean(cv_data$residual^2))
+mae      <- mean(abs(cv_data$residual))
+me       <- mean(cv_data$residual)
+loo_mse  <- mean(cv_data$residual^2)
+loo_sd   <- sd(cv_data$residual)  # Deviazione standard degli errori LOO
+
+# Mostra i risultati
+cat("✅ LOOCV results (solo punti validi):\n",
+    "RMSE     =", round(rmse, 4), "\n",
+    "MAE      =", round(mae, 4), "\n",
+    "ME       =", round(me, 4), "\n",
+    "loo_mse  =", round(loo_mse, 4), "\n",
+    "loo_sd   =", round(loo_sd, 4), "\n")
+
+
+```
+
+```{r}
+ita <- ita_clean
+#-------------------------------------------------------------------
+# Filtro per rimuovere gli NA nelle covariate
+ita_clean <- ita_clean[
+  !is.na(ita_clean$Vs30_Brunelli_simple) &
+  !is.na(ita_clean$slope50_simple) &
+  ita_clean$Lito_Bucci_simple %in% c(9, 10, 11, 5), 
+]
+
+i=ita_clean
+ita_clean=ita
+ita=i
+# Estrai le coordinate
+coords <- coordinates(ita)
+
+# Aggiungile al data.frame
+ita@data$x  <- coords[, 1]
+ita@data$y  <- coords[, 2]
+
+FORMULA = formula(dS2S_SA_T0_100 ~ (1/slope50_simple)+sqrt(Vs30_Brunelli_simple)) # a single constant predictor
+v= variogram(FORMULA, data=ita)
+# v0= variogram(FORMULA, data=df0)
+plot(v, main = 'Variogram', pch=19)
+plot(variogram(FORMULA, ita, alpha = c(0, 45, 90, 135)),pch=19) #They look similar, i.e. have isotropy (and most likely also stationarity)
+dev.off()
+
+#VARIOGRAM model: Sferico con nugget è coerente con i dati; Range iniziale ≈ 250 000 m; sill parziale ≈ 0.30; nugget ≈ 0.10;
+
+v1 = vgm(0.3, "Sph", 250000, 0.1) 
+v.fit <- fit.variogram(v, v1, fit.ranges = TRUE)
+plot(v, v.fit, pch = 19) #Very good at the beginning
+```
+
+```{r}
+# --- LOOCV: Leave-One-Out Cross Validation ---
+
+# Verifica che ita_clean sia ancora oggetto spaziale
+if (!inherits(ita_clean, "Spatial")) {
+  coordinates(ita_clean) <- ~x + y
+}
+
+# Esegui LOOCV
+cv <- krige.cv(
+  formula   = FORMULA,
+  locations = ita,
+  model     = v.fit  # puoi abbassare se necessario
+)
+
+sum(!is.na(cv@data[["var1.pred"]]))
+
+# Elimina righe con NA in var1.pred (cioè dove la predizione non è riuscita)
+cv_data <- cv@data[!is.na(cv@data[["var1.pred"]]), ]
+
+# Calcola gli errori
+cv_data$residual <- cv_data$observed - cv_data$var1.pred
+rmse     <- sqrt(mean(cv_data$residual^2))
+mae      <- mean(abs(cv_data$residual))
+me       <- mean(cv_data$residual)
+loo_mse  <- mean(cv_data$residual^2)
+loo_sd   <- sd(cv_data$residual)  # Deviazione standard degli errori LOO
+
+# Mostra i risultati
+cat("✅ LOOCV results (solo punti validi):\n",
+    "RMSE     =", round(rmse, 4), "\n",
+    "MAE      =", round(mae, 4), "\n",
+    "ME       =", round(me, 4), "\n",
+    "loo_mse  =", round(loo_mse, 4), "\n",
+    "loo_sd   =", round(loo_sd, 4), "\n")
+
+
+```
+
+```{r}
+ita <- ita_clean
+#-------------------------------------------------------------------
+# Filtro per rimuovere gli NA nelle covariate
+ita_clean <- ita_clean[
+  !is.na(ita_clean$Vs30_Brunelli_simple) &
+  !is.na(ita_clean$slope50_simple) &
+  ita_clean$Lito_Bucci_simple %in% c(2, 3, 4), 
+]
+
+i=ita_clean
+ita_clean=ita
+ita=i
+# Estrai le coordinate
+coords <- coordinates(ita)
+
+# Aggiungile al data.frame
+ita@data$x  <- coords[, 1]
+ita@data$y  <- coords[, 2]
+
+FORMULA = formula(dS2S_SA_T0_100 ~ (1/slope50_simple)+sqrt(Vs30_Brunelli_simple)) # a single constant predictor
+v= variogram(FORMULA, data=ita)
+# v0= variogram(FORMULA, data=df0)
+plot(v, main = 'Variogram', pch=19)
+plot(variogram(FORMULA, ita, alpha = c(0, 45, 90, 135)),pch=19) #They look similar, i.e. have isotropy (and most likely also stationarity)
+dev.off()
+
+#VARIOGRAM model: Sferico con nugget è coerente con i dati; Range iniziale ≈ 250 000 m; sill parziale ≈ 0.30; nugget ≈ 0.10;
+
+v1 = vgm(0.3, "Sph", 250000, 0.1) 
+v.fit <- fit.variogram(v, v1, fit.ranges = TRUE)
+plot(v, v.fit, pch = 19) #Very good at the beginning
+```
+
+```{r}
+# --- LOOCV: Leave-One-Out Cross Validation ---
+
+# Verifica che ita_clean sia ancora oggetto spaziale
+if (!inherits(ita_clean, "Spatial")) {
+  coordinates(ita_clean) <- ~x + y
+}
+
+# Esegui LOOCV
+cv <- krige.cv(
+  formula   = FORMULA,
+  locations = ita,
+  model     = v.fit  # puoi abbassare se necessario
+)
+
+sum(!is.na(cv@data[["var1.pred"]]))
+
+# Elimina righe con NA in var1.pred (cioè dove la predizione non è riuscita)
+cv_data <- cv@data[!is.na(cv@data[["var1.pred"]]), ]
+
+# Calcola gli errori
+cv_data$residual <- cv_data$observed - cv_data$var1.pred
+rmse     <- sqrt(mean(cv_data$residual^2))
+mae      <- mean(abs(cv_data$residual))
+me       <- mean(cv_data$residual)
+loo_mse  <- mean(cv_data$residual^2)
+loo_sd   <- sd(cv_data$residual)  # Deviazione standard degli errori LOO
+
+# Mostra i risultati
+cat("✅ LOOCV results (solo punti validi):\n",
+    "RMSE     =", round(rmse, 4), "\n",
+    "MAE      =", round(mae, 4), "\n",
+    "ME       =", round(me, 4), "\n",
+    "loo_mse  =", round(loo_mse, 4), "\n",
+    "loo_sd   =", round(loo_sd, 4), "\n")
+
+
+```
